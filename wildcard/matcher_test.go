@@ -18,6 +18,7 @@ package wildcard
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -53,7 +54,7 @@ func testMatches(t *testing.T, pattern string, matches []string, invalids []stri
 		t.Fatalf("bad pattern: '%s' (%s)", pattern, err)
 	}
 
-	t.Logf("testing pattern: '%s' => '%s'", pattern, matcher.(regexpMatcher).pattern.String())
+	t.Logf("testing pattern: '%s' => '%s'", pattern, strings.Join(matcher.(splitMatcher).segments, ("/")))
 
 	for _, candidate := range matches {
 		if !matcher.Matches(candidate) {
@@ -247,9 +248,9 @@ func TestMatchingWithMetaChars(t *testing.T) {
 		})
 	testMatches(t,
 		// The meta chars should not be interpreted as a regex
-		".+",
+		"spiffe://.+",
 		[]string{
-			".+",
+			"spiffe://.+",
 		},
 		[]string{
 			"invalid",
@@ -259,6 +260,9 @@ func TestMatchingWithMetaChars(t *testing.T) {
 func TestInvalidPatterns(t *testing.T) {
 	for _, pattern := range []string{
 		"",
+		"spiffe://foo*/asdf",
+		"spiffe://*foo/asdf",
+		"spiffe://**/asdf",
 		"test://foo*/asdf",
 		"test://*foo/asdf",
 		"test://**/asdf",
@@ -279,20 +283,20 @@ func TestMustCompile(t *testing.T) {
 	}()
 
 	// Compile with valid pattern
-	p := MustCompile("test/**")
+	p := MustCompile("spiffe://test/**")
 	if p == nil {
 		t.Error("MustCompile returned nil with valid pattern?")
 	}
 
 	// Compile with invalid pattern (should panic)
-	MustCompile("**/test")
+	MustCompile("spiffe://**/test")
 }
 
 func TestCompileList(t *testing.T) {
 	// Compile with valid patterns
 	ms, err := CompileList([]string{
-		"test",
-		"test/**",
+		"spiffe://test",
+		"spiffe://test/**",
 	})
 	if err != nil {
 		t.Errorf("CompileList failed with valid patterns: %s", err)
@@ -304,7 +308,7 @@ func TestCompileList(t *testing.T) {
 	// Compile with valid patterns
 	ms, err = CompileList([]string{
 		"test",
-		"**/test",
+		"spiffe://**/test",
 	})
 	if err == nil {
 		t.Error("CompileList failed with invalid pattern in input")

@@ -39,9 +39,8 @@
 package wildcard
 
 import (
-	"bytes"
 	"errors"
-	"regexp"
+	"fmt"
 	"strings"
 )
 
@@ -49,22 +48,28 @@ const (
 	defaultSeparator = '/'
 )
 
+const (
+	DEBUG = false
+)
+
 var (
 	errEmptyPattern          = errors.New("input pattern was empty string")
 	errInvalidWildcard       = errors.New("wildcard '*' can only appear between two separators")
 	errInvalidDoubleWildcard = errors.New("wildcard '**' can only appear at end of pattern")
 	errRegexpCompile         = errors.New("unable to compile generated regex (internal bug)")
+	errInvalidPrefix         = errors.New("SPIFFE prefix invalid)")
+	errInvalidSegment        = errors.New("Invalid SPIFFE segment (empty)")
 )
 
 // Matcher represents a compiled pattern that can be matched against a string.
 type Matcher interface {
 	// Matches checks if the given input matches the compiled pattern.
 	Matches(string) bool
+	GetSegments() []string
 }
 
-type regexpMatcher struct {
-	// Compiled regular expression for this matcher
-	pattern *regexp.Regexp
+type splitMatcher struct {
+	segments []string
 }
 
 // Compile creates a new Matcher given a pattern, using '/' as the separator.
@@ -88,6 +93,14 @@ func CompileList(patterns []string) ([]Matcher, error) {
 // MustCompile creates a new Matcher given a pattern, using '/' as the separator,
 // and panics if the given pattern was invalid.
 func MustCompile(pattern string) Matcher {
+	if !PrefixCheck(pattern) {
+		panic("Wrong prefix")
+	}
+	if InnerDoubleStar(pattern) {
+		panic("Double star which is not at the end of pattern")
+	}
+	SuffixCheck(pattern)
+
 	m, err := CompileWithSeparator(pattern, defaultSeparator)
 	if err != nil {
 		panic(err)
@@ -95,69 +108,163 @@ func MustCompile(pattern string) Matcher {
 	return m
 }
 
+func PrefixCheck(pattern string) bool {
+	return strings.HasPrefix(pattern, "spiffe://")
+}
+
+func InnerDoubleStar(pattern string) bool {
+	firstinstance := strings.Index(pattern, "**")
+	return firstinstance > -1 && firstinstance < len(pattern)-2
+}
+
+func SuffixCheck(pattern string) {
+	if strings.HasSuffix(pattern, "/") {
+		// TODO: Warn
+	}
+}
+
 // CompileWithSeparator creates a new Matcher given a pattern and separator rune.
 func CompileWithSeparator(pattern string, separator rune) (Matcher, error) {
-	// Build regular expression from wildcard pattern
-	// - Wildcard '*' should match all chars except forward slash
-	// - Wildcard '**' should match all chars, including forward slash
-	// All other regex meta chars will need to be quoted
 
 	if pattern == "" {
 		return nil, errEmptyPattern
 	}
 
-	segments := strings.Split(pattern, string(separator))
+	if !PrefixCheck(pattern) {
+		return nil, errInvalidPrefix
+	}
 
-	var regex bytes.Buffer
-	regex.WriteString("^")
+	if InnerDoubleStar(pattern) {
+		return nil, errInvalidDoubleWildcard
+	}
 
-loop:
-	for i, segment := range segments {
-		switch segment {
-		case "*":
-			// Segment with wildcard
-			regex.WriteString("[^")
-			regex.WriteRune(separator)
-			regex.WriteString("]+")
-		case "**":
-			// Segment with double wildcard
-			// May only appear at the end of a pattern
-			if i != len(segments)-1 {
-				return nil, errInvalidDoubleWildcard
-			}
-			regex.WriteString("?(|")
-			regex.WriteRune(separator)
-			regex.WriteString(".*)$")
-			break loop
-		default:
-			// Segment to match literal string
-			if strings.Contains(segment, "*") {
-				return nil, errInvalidWildcard
-			}
-			regex.WriteString(regexp.QuoteMeta(segment))
+	segments := GetSegmentsFromURI(pattern, defaultSeparator)
+	// Check for malformed URI
+	for i, _ := range segments {
+		// "**" Embedded in a segment
+		if len(segments[i]) > 2 && strings.Contains(segments[i], "**") {
+			return nil, errInvalidDoubleWildcard
+			// "*" Embedded in a segment - other than "**"
+		} else if len(segments[i]) > 1 && segments[i] != "**" && strings.Contains(segments[i], "*") {
+			return nil, errInvalidWildcard
 		}
-
-		// Separate this segment from next one
-		regex.WriteRune(separator)
-
-		if i == len(segments)-1 {
-			// Final slash should be optional
-			// We want "path" and "path/" to match
-			regex.WriteString("?$")
+		// Empty segment, e.g.: "//"
+		if len(segments[i]) == 0 {
+			return nil, errInvalidSegment
 		}
 	}
 
-	compiled, err := regexp.Compile(regex.String())
-	if err != nil {
-		return nil, errRegexpCompile
-	}
-
-	return regexpMatcher{
-		pattern: compiled,
+	return splitMatcher{
+		segments: segments,
 	}, nil
 }
 
+func ParseURIWithSeparator(uri string, separator rune) (Matcher, error) {
+
+	if uri == "" {
+		return nil, errEmptyPattern
+	}
+
+	if !PrefixCheck(uri) {
+		return nil, errInvalidPrefix
+	}
+
+	segments := GetSegmentsFromURI(uri, defaultSeparator)
+	// Check for malformed URI
+	for i, _ := range segments {
+		// Empty segment, e.g.: "//"
+		if len(segments[i]) == 0 {
+			return nil, errInvalidSegment
+		}
+	}
+
+	return splitMatcher{
+		segments: segments,
+	}, nil
+}
+
+// This function assumes the URI is well-formed. Specifically that it starts with "spiffe://".
+// Otherwise could violate bounds
+func GetSegmentsFromURI(acl string, separator rune) []string {
+	// For trailing slash
+	var segments []string
+	if acl[len(acl)-1] == '/' {
+		segments = strings.Split(string(acl[9:len(acl)-1]), string(separator))
+	} else {
+		// Default case
+		segments = strings.Split(string(acl[9:]), string(separator))
+	}
+	return segments
+}
+
 // Matches checks if the given input matches the compiled pattern.
-func (rm regexpMatcher) Matches(input string) bool {
-	return rm.pattern.Match([]byte(input))
+func (acl splitMatcher) Matches(input string) bool {
+	//return rm.pattern.Match([]byte(input))
+	uriSegments, err := ParseURIWithSeparator(input, defaultSeparator)
+
+	if err != nil {
+		return false
+	}
+
+	if DEBUG {
+		fmt.Println("Comparing: ", strings.Join(uriSegments.GetSegments(), "!"))
+		fmt.Println("	Length: ", len(uriSegments.GetSegments()))
+		fmt.Println("With ACL : ", strings.Join(acl.segments, "!"))
+		fmt.Println("	Length: ", len(acl.segments))
+	}
+
+	minlen := len(uriSegments.GetSegments())
+	if len(acl.segments) < minlen {
+		minlen = len(acl.segments)
+	}
+
+	// We need to access `i` after the loop to check for "**"
+	i := 0
+
+	for ; i < minlen; i++ {
+		if DEBUG {
+			fmt.Println("ACL segment: ", acl.segments[i])
+			fmt.Println("URI segment: ", uriSegments.GetSegments()[i])
+			fmt.Println("")
+		}
+		// Current segment matches
+		if acl.segments[i] == "*" || acl.segments[i] == uriSegments.GetSegments()[i] {
+			if DEBUG {
+				fmt.Println("[+] continue")
+			}
+			continue
+			// "**" means we are done and the match was successful
+		} else if acl.segments[i] == "**" {
+			if DEBUG {
+				fmt.Println("[+] ** true - end")
+			}
+			return true
+		} else {
+			if DEBUG {
+				fmt.Println("[+] false - end")
+			}
+			return false
+		}
+	}
+
+	// Standard case: End reached without conflicts
+	if len(uriSegments.GetSegments()) == len(acl.segments) {
+		return true
+	}
+
+	// Special case: "**" after the URI is done.
+	// This must also be the last segment of the ACL.
+	// We assume the ACL to be properly formatted here
+	// And don't need to check this
+	if len(acl.segments) > i && acl.segments[i] == "**" {
+		return true
+	}
+
+	// If none of the above have worked, URI and ACL don't match
+	return false
+
+}
+
+func (acl splitMatcher) GetSegments() []string {
+	return acl.segments
 }
