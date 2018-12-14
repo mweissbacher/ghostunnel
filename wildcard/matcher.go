@@ -218,10 +218,7 @@ func (acl splitMatcher) Matches(input string) bool {
 		minlen = len(acl.segments)
 	}
 
-	// We need to access `i` after the loop to check for "**"
-	i := 0
-
-	for ; i < minlen; i++ {
+	for i := 0; i < minlen; i++ {
 		if DEBUG {
 			fmt.Println("ACL segment: ", acl.segments[i])
 			fmt.Println("URI segment: ", uriSegments.GetSegments()[i])
@@ -256,7 +253,7 @@ func (acl splitMatcher) Matches(input string) bool {
 	// This must also be the last segment of the ACL.
 	// We assume the ACL to be properly formatted here
 	// And don't need to check this
-	if len(acl.segments) > i && acl.segments[i] == "**" {
+	if len(acl.segments) > minlen && acl.segments[minlen] == "**" {
 		return true
 	}
 
